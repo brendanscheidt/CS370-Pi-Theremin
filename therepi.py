@@ -5,21 +5,20 @@ from mido import Message
 from mido.sockets import connect
 
 # --- Configuration ---
-
-# Ultrasonic sensor pin assignments
-TRIG = 23  # Trigger pin
-ECHO = 24  # Echo pin
-
-# MIDI connection settings
+TRIG = 23                     # Trigger pin
+ECHO = 24                     # Echo pin
 HOST = '10.255.93.67'
 PORT = 8080
 
-# Distance boundaries (in centimeters)
-MIN_DISTANCE = 15
-MAX_DISTANCE = 70
+MIN_DISTANCE = 15             # Lower bound in cm
+MAX_DISTANCE = 70             # Upper bound in cm
 
-# A minor scale (MIDI note numbers for one octave)
+# A minor scale: MIDI note numbers for one octave
 A_MINOR_SCALE = [57, 59, 60, 62, 64, 65, 67, 69]
+
+MIN_CHANGE = 2.0              # Minimum change (in cm) to update the note
+SENSOR_SETTLING_DELAY = 0.1   # Increased delay (in seconds) before triggering
+TRIGGER_PULSE_LENGTH = 0.00001  # 10 µs trigger pulse (standard)
 
 # --- Setup lgpio ---
 h = GPIO.gpiochip_open(0)
@@ -29,44 +28,49 @@ GPIO.gpio_claim_input(h, ECHO)
 # --- Helper Functions ---
 
 def get_distance(trigger_pin, echo_pin):
-    """Trigger the ultrasonic sensor and return the distance in cm."""
-    # Ensure trigger is LOW
+    """
+    Trigger the ultrasonic sensor and return the distance in centimeters.
+    A longer pre-trigger delay gives the sensor more time to settle.
+    """
+    # Ensure the trigger is LOW and wait for sensor settling.
     GPIO.gpio_write(h, trigger_pin, 0)
-    time.sleep(0.05)
+    time.sleep(SENSOR_SETTLING_DELAY)
     
-    # Send a 10 µs pulse to the trigger
+    # Send a 10 µs pulse to trigger the sensor.
     GPIO.gpio_write(h, trigger_pin, 1)
-    time.sleep(0.00001)  # 10 microseconds
+    time.sleep(TRIGGER_PULSE_LENGTH)
     GPIO.gpio_write(h, trigger_pin, 0)
     
-    # Wait for the echo: first for the rising edge then for the falling edge
+    # Wait for the echo signal: first for the rising edge, then the falling edge.
     while GPIO.gpio_read(h, echo_pin) == 0:
         pulse_start = time.time()
     while GPIO.gpio_read(h, echo_pin) == 1:
         pulse_end = time.time()
     
-    # Calculate distance: speed of sound is approximately 34300 cm/s
+    # Calculate distance using the speed of sound (~34300 cm/s).
     pulse_duration = pulse_end - pulse_start
     distance = (pulse_duration * 34300) / 2
     return round(distance, 2)
 
-def map_distance_to_scale(distance, in_min=MIN_DISTANCE, in_max=MAX_DISTANCE, scale=A_MINOR_SCALE):
+def map_distance_to_scale(distance):
     """
-    Map a measured distance to a note in the provided scale.
-    Returns a MIDI note number, or None if the distance is out of range.
+    Map a measured distance (cm) to a MIDI note in the A minor scale.
+    If the distance is outside the MIN_DISTANCE-MAX_DISTANCE range, return None.
     """
-    if distance < in_min or distance > in_max:
+    if distance < MIN_DISTANCE or distance > MAX_DISTANCE:
         return None
-    # Linearly map distance to an index in the scale list
-    index = int((distance - in_min) * (len(scale) - 1) / (in_max - in_min))
-    return scale[index]
+    # Linearly map the distance to an index in the scale list.
+    index = int((distance - MIN_DISTANCE) * (len(A_MINOR_SCALE) - 1) / (MAX_DISTANCE - MIN_DISTANCE))
+    return A_MINOR_SCALE[index]
 
 # --- Main Loop ---
 
 def main():
     midi_out = connect(HOST, PORT)
-    print("Simple Distance Reader mapping to A minor scale")
-    last_note = None
+    print("Ultrasonic Sensor with Extended Settling Delay and Hysteresis")
+    
+    last_note = None       # Last MIDI note sent
+    last_distance = None   # Distance that triggered the last note update
 
     try:
         while True:
@@ -75,22 +79,22 @@ def main():
             print(f"Distance: {distance} cm, Mapped Note: {note}")
             
             if note is None:
-                # If out of range, ensure any previously playing note is turned off.
+                # If the distance is out-of-range, turn off any active note.
                 if last_note is not None:
-                    msg = Message('note_off', note=last_note)
-                    midi_out.send(msg)
+                    midi_out.send(Message('note_off', note=last_note))
                     last_note = None
+                    last_distance = None
             else:
-                # If a new note is mapped (or changed), send note_off for the previous note
-                if note != last_note:
-                    if last_note is not None:
-                        midi_out.send(Message('note_off', note=last_note))
-                    midi_out.send(Message('note_on', note=note, velocity=127))
-                    last_note = note
-
-            # Pause briefly before the next reading
+                # Update the note only if the distance has changed by at least MIN_CHANGE.
+                if last_distance is None or abs(distance - last_distance) >= MIN_CHANGE:
+                    if note != last_note:
+                        if last_note is not None:
+                            midi_out.send(Message('note_off', note=last_note))
+                        midi_out.send(Message('note_on', note=note, velocity=127))
+                        last_note = note
+                    last_distance = distance
             time.sleep(0.1)
-
+            
     except KeyboardInterrupt:
         print("Exiting...")
         midi_out.close()
