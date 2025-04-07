@@ -1,24 +1,34 @@
 #!/usr/bin/env python3
 import time
+import math
 import lgpio as GPIO
 from mido import Message
 from mido.sockets import connect
 
 # --- Configuration ---
-TRIG = 23                     # Trigger pin
-ECHO = 24                     # Echo pin
+TRIG = 23          # Trigger pin
+ECHO = 24          # Echo pin
 HOST = '10.255.93.67'
 PORT = 8080
 
-MIN_DISTANCE = 15             # Lower bound in cm
-MAX_DISTANCE = 70             # Upper bound in cm
+MIN_DISTANCE = 15  # cm
+MAX_DISTANCE = 70  # cm
 
-# A minor scale: MIDI note numbers for one octave
-A_MINOR_SCALE = [57, 59, 60, 62, 64, 65, 67, 69]
+# Frequency mapping: distance maps linearly to frequency between these values.
+MIN_FREQ = 220.0   # Hz at MIN_DISTANCE
+MAX_FREQ = 440.0   # Hz at MAX_DISTANCE
 
-MIN_CHANGE = 2.0              # Minimum change (in cm) to update the note
-SENSOR_SETTLING_DELAY = 0.1   # Increased delay (in seconds) before triggering
-TRIGGER_PULSE_LENGTH = 0.00001  # 10 µs trigger pulse (standard)
+# Base note for the sustained tone.
+BASE_NOTE = 60         # MIDI note (Middle C)
+BASE_FREQ = 261.63     # Hz for MIDI note 60
+BEND_RANGE = 12        # Semitones – your synth should be set for ±12 semitones pitch bend.
+
+# Timing parameters for sensor triggering.
+SENSOR_SETTLING_DELAY = 0.1   # seconds before trigger
+TRIGGER_PULSE_LENGTH = 0.00001  # 10 µs pulse (standard)
+
+# To prevent jitter, only update pitch bend if change exceeds this value.
+PITCH_BEND_THRESHOLD = 10     # in pitch bend units
 
 # --- Setup lgpio ---
 h = GPIO.gpiochip_open(0)
@@ -30,73 +40,82 @@ GPIO.gpio_claim_input(h, ECHO)
 def get_distance(trigger_pin, echo_pin):
     """
     Trigger the ultrasonic sensor and return the distance in centimeters.
-    A longer pre-trigger delay gives the sensor more time to settle.
     """
-    # Ensure the trigger is LOW and wait for sensor settling.
+    # Ensure the sensor is settled.
     GPIO.gpio_write(h, trigger_pin, 0)
     time.sleep(SENSOR_SETTLING_DELAY)
     
-    # Send a 10 µs pulse to trigger the sensor.
+    # Send a 10 µs pulse.
     GPIO.gpio_write(h, trigger_pin, 1)
     time.sleep(TRIGGER_PULSE_LENGTH)
     GPIO.gpio_write(h, trigger_pin, 0)
     
-    # Wait for the echo signal: first for the rising edge, then the falling edge.
+    # Wait for echo: first rising then falling.
     while GPIO.gpio_read(h, echo_pin) == 0:
         pulse_start = time.time()
     while GPIO.gpio_read(h, echo_pin) == 1:
         pulse_end = time.time()
     
-    # Calculate distance using the speed of sound (~34300 cm/s).
+    # Calculate distance (speed of sound ~34300 cm/s).
     pulse_duration = pulse_end - pulse_start
     distance = (pulse_duration * 34300) / 2
     return round(distance, 2)
 
-def map_distance_to_scale(distance):
+def map_distance_to_frequency(distance):
     """
-    Map a measured distance (cm) to a MIDI note in the A minor scale.
-    If the distance is outside the MIN_DISTANCE-MAX_DISTANCE range, return None.
+    Linearly map the measured distance to a frequency between MIN_FREQ and MAX_FREQ.
+    The distance is clamped to the MIN_DISTANCE to MAX_DISTANCE range.
     """
-    if distance < MIN_DISTANCE or distance > MAX_DISTANCE:
-        return None
-    # Linearly map the distance to an index in the scale list.
-    index = int((distance - MIN_DISTANCE) * (len(A_MINOR_SCALE) - 1) / (MAX_DISTANCE - MIN_DISTANCE))
-    return A_MINOR_SCALE[index]
+    if distance < MIN_DISTANCE:
+        distance = MIN_DISTANCE
+    elif distance > MAX_DISTANCE:
+        distance = MAX_DISTANCE
+    freq = ((distance - MIN_DISTANCE) * (MAX_FREQ - MIN_FREQ) /
+            (MAX_DISTANCE - MIN_DISTANCE)) + MIN_FREQ
+    return freq
+
+def frequency_to_pitch_bend(freq, base_freq=BASE_FREQ, bend_range=BEND_RANGE):
+    """
+    Convert a target frequency into a MIDI pitch bend value.
+    First compute the semitone difference between freq and base_freq,
+    clamp that to ±bend_range, then map into a 14-bit pitch bend value (0-16383).
+    The center (no bend) is 8192.
+    """
+    semitone_diff = 12 * math.log2(freq / base_freq)
+    # Clamp the semitone difference.
+    semitone_diff = max(-bend_range, min(bend_range, semitone_diff))
+    # Map to a 14-bit pitch bend value.
+    pitch_bend = int(8192 + (semitone_diff / bend_range) * 8192)
+    pitch_bend = max(0, min(16383, pitch_bend))
+    return pitch_bend
 
 # --- Main Loop ---
 
 def main():
     midi_out = connect(HOST, PORT)
-    print("Ultrasonic Sensor with Extended Settling Delay and Hysteresis")
+    print("Starting sliding note with continuous pitch bend...")
     
-    last_note = None       # Last MIDI note sent
-    last_distance = None   # Distance that triggered the last note update
+    # Start a sustained note on BASE_NOTE.
+    midi_out.send(Message('note_on', note=BASE_NOTE, velocity=127))
+    last_pitch_bend = 8192  # Start with center (no bend).
 
     try:
         while True:
             distance = get_distance(TRIG, ECHO)
-            note = map_distance_to_scale(distance)
-            print(f"Distance: {distance} cm, Mapped Note: {note}")
+            freq = map_distance_to_frequency(distance)
+            pitch_bend = frequency_to_pitch_bend(freq)
+            print(f"Distance: {distance} cm, Frequency: {freq:.2f} Hz, Pitch Bend: {pitch_bend}")
             
-            if note is None:
-                # If the distance is out-of-range, turn off any active note.
-                if last_note is not None:
-                    midi_out.send(Message('note_off', note=last_note))
-                    last_note = None
-                    last_distance = None
-            else:
-                # Update the note only if the distance has changed by at least MIN_CHANGE.
-                if last_distance is None or abs(distance - last_distance) >= MIN_CHANGE:
-                    if note != last_note:
-                        if last_note is not None:
-                            midi_out.send(Message('note_off', note=last_note))
-                        midi_out.send(Message('note_on', note=note, velocity=127))
-                        last_note = note
-                    last_distance = distance
-            time.sleep(0.1)
+            # Only update if the change in pitch bend exceeds our threshold.
+            if abs(pitch_bend - last_pitch_bend) > PITCH_BEND_THRESHOLD:
+                midi_out.send(Message('pitchwheel', pitch=pitch_bend))
+                last_pitch_bend = pitch_bend
+            
+            time.sleep(0.05)
             
     except KeyboardInterrupt:
         print("Exiting...")
+        midi_out.send(Message('note_off', note=BASE_NOTE))
         midi_out.close()
         GPIO.gpiochip_close(h)
 
