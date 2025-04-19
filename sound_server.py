@@ -2,14 +2,21 @@
 import socket
 import pygame
 import numpy as np
+import signal
+import sys
 
-# --- Configuration ---
-LISTEN_HOST = ''    # all interfaces
+# ─── Configuration ─────────────────────────────────────────────────────────────
 LISTEN_PORT = 8080
-
-# audio setup
 SAMPLE_RATE = 44100  # Hz
-pygame.mixer.init(frequency=SAMPLE_RATE, size=-16, channels=1, buffer=512)
+
+# ─── Audio init ────────────────────────────────────────────────────────────────
+def init_audio():
+    try:
+        pygame.mixer.init(frequency=SAMPLE_RATE, size=-16, channels=1, buffer=512)
+        print("Audio initialized ✓")
+    except Exception as e:
+        print("Audio init failed:", e)
+        sys.exit(1)
 
 def play_tone(freq, duration=0.05):
     samples = int(SAMPLE_RATE * duration)
@@ -19,31 +26,59 @@ def play_tone(freq, duration=0.05):
     snd = pygame.sndarray.make_sound(data)
     snd.play()
 
+# ─── Main server ───────────────────────────────────────────────────────────────
 def main():
-    sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-    sock.bind((LISTEN_HOST, LISTEN_PORT))
-    sock.listen(1)
-    print(f"Sound server listening on port {LISTEN_PORT}…")
+    init_audio()
 
-    conn, addr = sock.accept()
-    print("Client connected from", addr)
-    f = conn.makefile('r')
+    sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
 
     try:
-        for line in f:
+        sock.bind(('0.0.0.0', LISTEN_PORT))
+    except Exception as e:
+        print("Bind error:", e)
+        sys.exit(1)
+
+    sock.listen(1)
+    print(f"Listening on port {LISTEN_PORT}…")
+
+    # Restore default SIGINT handler so Ctrl-C works inside accept/recv
+    signal.signal(signal.SIGINT, signal.SIG_DFL)
+
+    try:
+        conn, addr = sock.accept()
+        print("Client connected from", addr)
+        conn.settimeout(1.0)
+
+        buffer = b''
+        while True:
             try:
-                freq = float(line.strip())
-            except ValueError:
+                chunk = conn.recv(1024)
+                if not chunk:
+                    print("Client disconnected")
+                    break
+                buffer += chunk
+                while b'\n' in buffer:
+                    line, buffer = buffer.split(b'\n', 1)
+                    line = line.strip()
+                    if not line:
+                        continue
+                    try:
+                        freq = float(line.decode('ascii'))
+                    except ValueError:
+                        print("Bad data:", line)
+                        continue
+                    print(f"Playing → {freq:.0f} Hz")
+                    play_tone(freq)
+            except socket.timeout:
                 continue
-            print(f"Playing → {freq:.0f} Hz")
-            play_tone(freq)
+
     except KeyboardInterrupt:
-        print("Shutting down server…")
+        print("\nServer stopped by user")
     finally:
-        f.close()
-        conn.close()
         sock.close()
         pygame.quit()
+        print("Clean exit.")
 
 if __name__ == '__main__':
     main()
