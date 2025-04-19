@@ -1,30 +1,29 @@
 #!/usr/bin/env python3
 import time
-import lgpio as GPIO
 import socket
+import lgpio as GPIO
 
 # ─── Configuration ─────────────────────────────────────────────────────────────
-TRIG = 23          # BCM pin for trigger
-ECHO = 24          # BCM pin for echo
+TRIG = 23
+ECHO = 24
 
-MIN_DISTANCE = 15   # cm
-MAX_DISTANCE = 70   # cm
-MIN_FREQ     = 220.0  # Hz
-MAX_FREQ     = 440.0  # Hz
+MIN_DISTANCE = 15
+MAX_DISTANCE = 70
+MIN_FREQ     = 220.0
+MAX_FREQ     = 440.0
 
-SENSOR_SETTLING_DELAY = 0.1     # s
-TRIGGER_PULSE_LENGTH  = 0.00001 # s
+SENSOR_SETTLING_DELAY = 0.1
+TRIGGER_PULSE_LENGTH  = 0.00001
 
-SERVER_HOST = 'YOUR.SERVER.IP.HERE'  # ← change to your server’s LAN IP
+SERVER_HOST = '192.168.x.y'   # ← your server’s LAN IP
 SERVER_PORT = 8080
 
-# ─── Setup LGPIO ───────────────────────────────────────────────────────────────
+# ─── Setup lgpio ───────────────────────────────────────────────────────────────
 h = GPIO.gpiochip_open(0)
 GPIO.gpio_claim_output(h, TRIG)
 GPIO.gpio_claim_input(h, ECHO)
 
 def get_distance():
-    """Trigger HC‑SR04 and return distance in cm."""
     GPIO.gpio_write(h, TRIG, 0)
     time.sleep(SENSOR_SETTLING_DELAY)
     GPIO.gpio_write(h, TRIG, 1)
@@ -36,32 +35,28 @@ def get_distance():
     while GPIO.gpio_read(h, ECHO) == 1:
         end = time.time()
 
-    duration = end - start
-    return (duration * 34300) / 2
+    return (end - start) * 34300 / 2
 
 def map_distance_to_frequency(d):
-    """Clamp [MIN_DISTANCE…MAX_DISTANCE] → [MIN_FREQ…MAX_FREQ]."""
     d = max(MIN_DISTANCE, min(MAX_DISTANCE, d))
-    return ((d - MIN_DISTANCE) * (MAX_FREQ - MIN_FREQ)
-            / (MAX_DISTANCE - MIN_DISTANCE)) + MIN_FREQ
+    return ((d - MIN_DISTANCE) * (MAX_FREQ - MIN_FREQ) /
+            (MAX_DISTANCE - MIN_DISTANCE)) + MIN_FREQ
 
 def main():
-    # Connect once
-    sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-    print(f"Connecting to {SERVER_HOST}:{SERVER_PORT}…")
-    sock.connect((SERVER_HOST, SERVER_PORT))
-    print("Connected ✓")
+    sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    server_addr = (SERVER_HOST, SERVER_PORT)
+    print(f"Sending UDP to {SERVER_HOST}:{SERVER_PORT}")
 
     try:
         while True:
             dist = get_distance()
             freq = map_distance_to_frequency(dist)
-            line = f"{freq:.2f}\n".encode('ascii')
-            sock.sendall(line)
-            print(f"Sent → {freq:.2f} Hz")
+            msg = f"{freq:.2f}".encode('ascii')
+            sock.sendto(msg, server_addr)
+            print(f"Sent → {freq:.2f} Hz")
             time.sleep(0.05)
     except KeyboardInterrupt:
-        print("\nSender stopped by user")
+        print("\nStopped by user")
     finally:
         sock.close()
         GPIO.gpiochip_close(h)
