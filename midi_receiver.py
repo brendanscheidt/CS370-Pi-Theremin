@@ -1,67 +1,32 @@
-import RPi.GPIO as GPIO
-import time
-import numpy as np
-import pygame
+# TherePi
+# Kevin McAleer
+# 12 November 2021
+# LICENSE: https://unlicense.org
+# Mido Midi Receiver
 
-# ─── Hardware setup ────────────────────────────────────────────────────────────
-GPIO.setmode(GPIO.BCM)
-TRIG_PIN = 23
-ECHO_PIN = 24
-GPIO.setup(TRIG_PIN, GPIO.OUT)
-GPIO.setup(ECHO_PIN, GPIO.IN)
+import mido
+from mido import Message
+from mido.sockets import PortServer
 
-# ─── Audio setup ───────────────────────────────────────────────────────────────
-SAMPLE_RATE = 44100      # Hz
-pygame.mixer.init(frequency=SAMPLE_RATE, size=-16, channels=1, buffer=512)
+# from midi.ports import port
 
-def get_distance_cm():
-    """Trigger the ultrasonic sensor and return distance in cm."""
-    # send 10 µs pulse
-    GPIO.output(TRIG_PIN, False)
-    time.sleep(0.05)
-    GPIO.output(TRIG_PIN, True)
-    time.sleep(0.00001)
-    GPIO.output(TRIG_PIN, False)
+HOST = '10.255.93.67'
+PORT = 8080
 
-    # wait for echo start
-    while GPIO.input(ECHO_PIN) == 0:
-        pulse_start = time.time()
-    # wait for echo end
-    while GPIO.input(ECHO_PIN) == 1:
-        pulse_end = time.time()
+# Setup Midi Environment
+IAC = 'virtual MIDI 1'
+port = mido.open_output(IAC)
 
-    pulse_duration = pulse_end - pulse_start
-    # speed of sound is ~34300 cm/s, round‑trip so /2
-    return pulse_duration * 17150
-
-def dist_to_freq(distance, d_min=2, d_max=200, f_min=200, f_max=2000):
-    """
-    Map [d_min…d_max] cm to [f_max…f_min] Hz.
-    (Closer → higher pitch.)
-    """
-    # clamp
-    d = max(d_min, min(d_max, distance))
-    return np.interp(d, [d_min, d_max], [f_max, f_min])
-
-def play_tone(frequency, duration=0.1):
-    """Generate a sine wave at `frequency` Hz for `duration` seconds."""
-    samples = int(SAMPLE_RATE * duration)
-    t = np.linspace(0, duration, samples, False)
-    wave = 0.5 * np.sin(2 * np.pi * frequency * t)
-    data = np.int16(wave * 32767)
-    sound = pygame.sndarray.make_sound(data)
-    sound.play()
-
-try:
-    print("Reading sensor and playing tone—Ctrl‑C to quit.")
+with PortServer(HOST, PORT) as server:
+    print("TherePi Midi Receiver Server started...")
     while True:
-        dist = get_distance_cm()
-        freq = dist_to_freq(dist)
-        print(f"{dist:.1f} cm → {freq:.0f} Hz")
-        play_tone(freq, duration=0.05)
+        try:
+            client = server.accept()
+            for message in client:
+                port.send(message)
+                print(message)
+        except KeyboardInterrupt:
+            port.close()
+            break
 
-except KeyboardInterrupt:
-    pass
-finally:
-    GPIO.cleanup()
-    pygame.quit()
+        
