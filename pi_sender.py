@@ -3,7 +3,7 @@ import time
 import lgpio as GPIO
 import socket
 
-# --- Configuration ---
+# ─── Configuration ─────────────────────────────────────────────────────────────
 TRIG = 23          # BCM pin for trigger
 ECHO = 24          # BCM pin for echo
 
@@ -12,62 +12,57 @@ MAX_DISTANCE = 70   # cm
 MIN_FREQ     = 220.0  # Hz
 MAX_FREQ     = 440.0  # Hz
 
-SENSOR_SETTLING_DELAY = 0.1    # s
-TRIGGER_PULSE_LENGTH  = 0.00001  # s
+SENSOR_SETTLING_DELAY = 0.1     # s
+TRIGGER_PULSE_LENGTH  = 0.00001 # s
 
-# Server you want to stream frequencies to:
-SERVER_HOST = '192.168.1.42'   # ← change to your server’s IP
+SERVER_HOST = 'YOUR.SERVER.IP.HERE'  # ← change to your server’s LAN IP
 SERVER_PORT = 8080
 
-# --- Setup lgpio ---
+# ─── Setup LGPIO ───────────────────────────────────────────────────────────────
 h = GPIO.gpiochip_open(0)
 GPIO.gpio_claim_output(h, TRIG)
 GPIO.gpio_claim_input(h, ECHO)
 
-def get_distance(trigger_pin, echo_pin):
-    """Trigger HC‑SR04 and measure round‑trip time → cm."""
-    GPIO.gpio_write(h, trigger_pin, 0)
+def get_distance():
+    """Trigger HC‑SR04 and return distance in cm."""
+    GPIO.gpio_write(h, TRIG, 0)
     time.sleep(SENSOR_SETTLING_DELAY)
-    GPIO.gpio_write(h, trigger_pin, 1)
+    GPIO.gpio_write(h, TRIG, 1)
     time.sleep(TRIGGER_PULSE_LENGTH)
-    GPIO.gpio_write(h, trigger_pin, 0)
+    GPIO.gpio_write(h, TRIG, 0)
 
-    # wait for echo HIGH
-    while GPIO.gpio_read(h, echo_pin) == 0:
-        pulse_start = time.time()
-    # wait for echo LOW
-    while GPIO.gpio_read(h, echo_pin) == 1:
-        pulse_end = time.time()
+    while GPIO.gpio_read(h, ECHO) == 0:
+        start = time.time()
+    while GPIO.gpio_read(h, ECHO) == 1:
+        end = time.time()
 
-    duration = pulse_end - pulse_start
-    return round((duration * 34300) / 2, 2)
+    duration = end - start
+    return (duration * 34300) / 2
 
-def map_distance_to_frequency(distance):
+def map_distance_to_frequency(d):
     """Clamp [MIN_DISTANCE…MAX_DISTANCE] → [MIN_FREQ…MAX_FREQ]."""
-    d = max(MIN_DISTANCE, min(MAX_DISTANCE, distance))
+    d = max(MIN_DISTANCE, min(MAX_DISTANCE, d))
     return ((d - MIN_DISTANCE) * (MAX_FREQ - MIN_FREQ)
             / (MAX_DISTANCE - MIN_DISTANCE)) + MIN_FREQ
 
 def main():
-    # open TCP connection to server
+    # Connect once
     sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    print(f"Connecting to {SERVER_HOST}:{SERVER_PORT}…")
     sock.connect((SERVER_HOST, SERVER_PORT))
-    f = sock.makefile('w')
+    print("Connected ✓")
 
-    print(f"Connected to sound server at {SERVER_HOST}:{SERVER_PORT}")
     try:
         while True:
-            dist = get_distance(TRIG, ECHO)
+            dist = get_distance()
             freq = map_distance_to_frequency(dist)
-            # send as text line "frequency\n"
-            f.write(f"{freq:.2f}\n")
-            f.flush()
+            line = f"{freq:.2f}\n".encode('ascii')
+            sock.sendall(line)
             print(f"Sent → {freq:.2f} Hz")
             time.sleep(0.05)
     except KeyboardInterrupt:
-        print("Stopping sender…")
+        print("\nSender stopped by user")
     finally:
-        f.close()
         sock.close()
         GPIO.gpiochip_close(h)
 
