@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
-import socket
-import pygame
-import numpy as np
 import signal
+import socket
 import sys
+
+import numpy as np
+import pygame
 
 # ─── Configuration ─────────────────────────────────────────────────────────────
 LISTEN_PORT = 8080
@@ -29,6 +30,17 @@ def play_tone(freq, duration=0.05):
 # ─── Main server ───────────────────────────────────────────────────────────────
 def main():
     init_audio()
+
+    # ─── Determine and print this host's LAN IP ────────────────────────────────
+    try:
+        s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        # doesn't actually send packets, just uses this to get the local IP
+        s.connect(("8.8.8.8", 80))
+        local_ip = s.getsockname()[0]
+        s.close()
+    except Exception:
+        local_ip = "127.0.0.1"
+    print(f"Server will listen on: {local_ip}:{LISTEN_PORT}")
 
     sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
